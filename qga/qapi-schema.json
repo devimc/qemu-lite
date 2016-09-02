@@ -1017,6 +1017,8 @@
 # @input-data: #optional data to be passed to process stdin (base64 encoded)
 # @capture-output: #optional bool flag to enable capture of
 #                  stdout/stderr of running process. defaults to false.
+# @vsport: #optional redirect stdin/stdout/stderr of running process to given
+#                  virtio serial port
 #
 # Returns: PID on success.
 #
@@ -1024,5 +1026,5 @@
 ##
 { 'command': 'guest-exec',
   'data':    { 'path': 'str', '*arg': ['str'], '*env': ['str'],
-               '*input-data': 'str', '*capture-output': 'bool' },
+               '*input-data': 'str', '*capture-output': 'bool', '*vsport': 'str' },
   'returns': 'GuestExec' }

@@ -12,6 +12,7 @@
 
 #include "qemu/osdep.h"
 #include <glib.h>
+#include <glib/gstdio.h>
 #include "qga/guest-agent-core.h"
 #include "qga-qmp-commands.h"
 #include "qapi/qmp/qerror.h"
@@ -98,6 +99,7 @@ struct GuestExecInfo {
     GuestExecIOData in;
     GuestExecIOData out;
     GuestExecIOData err;
+    char* vsport;
     QTAILQ_ENTRY(GuestExecInfo) next;
 };
 typedef struct GuestExecInfo GuestExecInfo;
@@ -141,6 +143,11 @@ static GuestExecInfo *guest_exec_info_find(int64_t pid_numeric)
 
     return NULL;
 }
+
+// CLR FIXME: add function to get finished processes ?
+// probably not, because when a client query the process' status, response will have
+// a virtio-serial-port
+// guest_exec_get_finished_processes
 
 GuestExecStatus *qmp_guest_exec_status(int64_t pid, Error **err)
 {
@@ -216,6 +223,8 @@ GuestExecStatus *qmp_guest_exec_status(int64_t pid, Error **err)
             ges->has_err_truncated = gei->err.truncated;
         }
 
+        //CLR FIXME: add vsp
+
         QTAILQ_REMOVE(&guest_exec_state.processes, gei, next);
         g_free(gei);
     }
@@ -270,11 +279,15 @@ static void guest_exec_child_watch(GPid pid, gint status, gpointer data)
     g_spawn_close_pid(pid);
 }
 
-/** Reset ignored signals back to default. */
+/** Reset ignored signals back to default
+ * and redirect stdin/stdout/stderr to virtio serial port
+ */
 static void guest_exec_task_setup(gpointer data)
 {
 #if !defined(G_OS_WIN32)
     struct sigaction sigact;
+    char* vsport;
+    int fd;
 
     memset(&sigact, 0, sizeof(struct sigaction));
     sigact.sa_handler = SIG_DFL;
@@ -282,6 +295,28 @@ static void guest_exec_task_setup(gpointer data)
     if (sigaction(SIGPIPE, &sigact, NULL) != 0) {
         slog("sigaction() failed to reset child process's SIGPIPE: %s",
              strerror(errno));
+    }
+
+    if (data) {
+		vsport = g_strdup_printf("/dev/virtio-ports/%s", (const char*)data);
+		fd = g_open(vsport, O_RDWR | O_NOCTTY);
+		if (fd < 0) {
+			slog("g_open() failed to open virtio serial port: %s", vsport);
+		} else {
+			if (dup2(fd, STDIN_FILENO) < 0) {
+				slog("dup2() failed to dup STDIN_FILENO");
+			}
+			if (dup2(fd, STDOUT_FILENO) < 0) {
+				slog("dup2() failed to dup STDOUT_FILENO");
+			}
+			if (dup2(fd, STDERR_FILENO) < 0) {
+				slog("dup2() failed to dup STDERR_FILENO");
+			}
+			if (fd) {
+				close(fd);
+			}
+		}
+		g_free(vsport);
     }
 #endif
 }
@@ -384,6 +419,7 @@ GuestExec *qmp_guest_exec(const char *path,
                        bool has_env, strList *env,
                        bool has_input_data, const char *input_data,
                        bool has_capture_output, bool capture_output,
+                       bool has_vsport, const char* vsport,
                        Error **err)
 {
     GPid pid;
@@ -422,7 +458,8 @@ GuestExec *qmp_guest_exec(const char *path,
     }
 
     ret = g_spawn_async_with_pipes(NULL, argv, envp, flags,
-            guest_exec_task_setup, NULL, &pid, has_input_data ? &in_fd : NULL,
+            guest_exec_task_setup, has_vsport ? (void*)vsport : NULL,
+            &pid, has_input_data ? &in_fd : NULL,
             has_output ? &out_fd : NULL, has_output ? &err_fd : NULL, &gerr);
     if (!ret) {
         error_setg(err, QERR_QGA_COMMAND_FAILED, gerr->message);
@@ -435,6 +472,7 @@ GuestExec *qmp_guest_exec(const char *path,
 
     gei = guest_exec_info_add(pid);
     gei->has_output = has_output;
+    gei->vsport = has_vsport ? g_strdup(vsport) : NULL;
     g_child_watch_add(pid, guest_exec_child_watch, gei);
 
     if (has_input_data) {
